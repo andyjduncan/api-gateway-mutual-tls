@@ -1,0 +1,108 @@
+= Mutual TLS authentication with API Gateway and a private certificate authority
+
+This project deploys an AWS API Gateway using https://aws.amazon.com/blogs/compute/introducing-mutual-tls-authentication-for-amazon-api-gateway/[Mutual TLS authentication]
+and a private certificate authority.  There is sample client code in various programming languages.
+
+== Deploying
+
+=== Prerequisites
+
+Route 53 domain
+
+=== Create private certificate authority
+
+The private CA root will be managed using https://github.com/square/certstrap/[certstrap] using a Docker image
+https://hub.docker.com/r/governmentpaas/certstrap[packaged by the Government Digital Service].  The trust chain will be
+two deep: a CA root certificate and an intermediate certificate to sign API client certificates.
+
+[source,shell script]
+----
+docker run -i -v $PWD/ca:/out governmentpaas/certstrap:main ./certstrap init --common-name "MyCertificateAuthority"                 # <1>
+docker run -i -v $PWD/ca:/out governmentpaas/certstrap:main ./certstrap request-cert --common-name "ApiGateway"                     # <2>
+docker run -i -v $PWD/ca:/out governmentpaas/certstrap:main ./certstrap sign --intermediate --CA MyCertificateAuthority ApiGateway  # <3>
+cat ca/MyCertificateAuthority.crt ca/ApiGateway.crt > truststore.pem                                                                # <4>
+----
+<1> Create the certificate authority root certificate
+<2> Request intermediate certificate for ApiGateway
+<3> Sign intermediate certificate with CA root
+<4> Create trust store file
+
+This results in the following directory structure:
+
+[source,text]
+----
+ca-home
+├── ca
+│   ├── ApiGateway.crt              # <1>
+│   ├── ApiGateway.csr              # <2>
+│   ├── ApiGateway.key              # <3>
+│   ├── MyCertificateAuthority.crl  # <4>
+│   ├── MyCertificateAuthority.crt  # <5>
+│   └── MyCertificateAuthority.key  # <6>
+└── truststore.pem                  # <7>
+----
+<1> API Gateway intermediate certificate
+<2> API Gateway signing request
+<3> API Gateway key
+<4> Certificate revocation list
+<5> Certificate authority root certificate
+<6> Certificate authority root key
+<7> Bundled certificates for API Gateway trust store
+
+Only the ApiGateway certificate and key are needed to sign client certicates so the root certificate and key can be
+safely stored.
+
+=== Deploy trust store stack
+
+Deploy the CloudFormation stack defined in `truststore.yml` with the name `tls-api-truststore`.  The stack will create
+an S3 bucket to hold the trust store bundle.  The name of the bucket is available in the export `tls-truststore-bucket`.
+
+Copy the `truststore.pem` file created above to the root of the S3 bucket.
+
+=== Deploy API Gateway stack
+
+Deploy the CloudFormation stack defined in `api-gateway.yml` with the name `tls-api`.  The stack requires four
+parameters:
+
+|===
+|Parameter |Value
+
+|Custom domain name
+|The custom domain name for the API
+
+|Route 53 zone
+|Hosted Zone id to create the API DNs entry in
+
+|Certificate arn
+|Certificate Manager certificate arn for the domain.  It must have the custom domain name as a subject
+
+|Truststore version
+|S3 version of the truststore object
+|===
+
+== Client examples
+
+There are client examples under the `client-examples` directory.
+
+=== Curl
+
+Curl can use the client key and certificate directly.  The `curl/request.sh` script takes three arguments: the
+path to the RSA private key, the path to the PEM certificate, and the API URL.
+
+=== Python requests
+
+The Python requests library can use the client key and certficate directly.  The `python/requests.py` script takes
+three arguments: the path to the RSA private key, the path to the PEM certificate, and the API URL.
+
+=== Java Core HTTP
+
+Java can't work with RSA keys directly.  The key needs to be converted to DER format first:
+
+[source,shell script]
+----
+openssl pkcs8 -topk8 -inform PEM -outform DER -in my_client.key -nocrypt > my_client.der
+----
+
+The `java\CoreHttp.java` file contains a class that takes three arguments: the path to the DER private key, the path to
+the PEM certificate, and the API URL.  If https://github.com/jbangdev/jbang[jbang] is on the path, the java file can be
+executed directly from Bash or Zsh.

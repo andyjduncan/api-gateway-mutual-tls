@@ -1,0 +1,64 @@
+service:
+  name: serverless-tls
+
+custom:
+  domainName: ${opt:domain-name}
+  hostedZoneId: ${opt:hosted-zone-id}
+  certificateArn: ${opt:certificate-arn}
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'eu-west-1'}
+  cfnRole: ${cf:serverless-tls-iam.CloudformationDeploymentRoleOutput}
+
+functions:
+  echo:
+    handler: index.echo
+    events:
+      - httpApi:
+          method: GET
+          path: /echo
+          payload: '2.0'
+
+resources:
+  Resources:
+    TruststoreBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: "aws:kms"
+        VersioningConfiguration:
+          Status: Enabled
+    DomainName:
+      Type: AWS::ApiGatewayV2::DomainName
+      Properties:
+        DomainName: ${self:custom.domainName}
+        DomainNameConfigurations:
+          - CertificateArn: ${self:custom.certificateArn}
+            EndpointType: REGIONAL
+            SecurityPolicy: TLS_1_2
+        MutualTlsAuthentication:
+          TruststoreUri: !Sub "s3://${TruststoreBucket}/truststore.pem"
+    DomainMapping:
+      Type: AWS::ApiGatewayV2::ApiMapping
+      Properties:
+        ApiId: !Ref HttpApi
+        DomainName: !Ref DomainName
+        Stage: !Ref HttpApiStage
+    DnsRecord:
+      Type: AWS::Route53::RecordSet
+      Properties:
+        AliasTarget:
+          DNSName: !GetAtt DomainName.RegionalDomainName
+          HostedZoneId: !GetAtt DomainName.RegionalHostedZoneId
+        HostedZoneId: ${self:custom.hostedZoneId}
+        Name: ${self:custom.domainName}
+        Type: A
+
+  Outputs:
+    TruststoreBucketName:
+      Value: !Ref TruststoreBucket

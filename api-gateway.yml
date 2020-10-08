@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description:
+  Mutual TLS API Gateway
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: API Custom Domain
+        Parameters:
+          - ApiDomainName
+          - HostedZoneId
+          - CertificateArn
+          - TruststoreVersion
+    ParameterLabels:
+      ApiDomainName:
+        default: Custom domain name
+      HostedZoneId:
+        default: Route 53 zone
+      CertificateArn:
+        default: Certificate arn
+      TruststoreVersion:
+        default: Truststore version
+
+
+Parameters:
+  ApiDomainName:
+    Type: String
+    Description: API custom domain name.  Must be valid in the Route 53 zone.
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Route 53 Hosted Zone to create DNS entries in.
+  CertificateArn:
+    Type: String
+    Description: Certificate for custom domain name.  Must have a subject name matching the API domain name.
+  TruststoreVersion:
+    Type: String
+    Description: Version id of the truststore object.
+
+Resources:
+  EchoFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  EchoFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          'use strict';
+
+          module.exports.echo = async (request) => {
+           return request;
+          };
+      Handler: index.echo
+      Role: !GetAtt EchoFunctionExecutionRole.Arn
+      Runtime: nodejs12.x
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      ProtocolType: HTTP
+      Name: !Sub "${AWS::StackName}-api"
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      AutoDeploy: true
+      StageName: "$default"
+  EchoFunctionApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt EchoFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+  EchoFunctionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt EchoFunction.Arn
+      PayloadFormatVersion: "2.0"
+  EchoRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /echo
+      Target: !Join [ "/", [ integrations, !Ref EchoFunctionIntegration ] ]
+    DependsOn: EchoFunctionIntegration
+  DomainName:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Ref ApiDomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+      MutualTlsAuthentication:
+        TruststoreUri: !Sub
+          - "s3://${TruststoreBucket}/truststore.pem"
+          - TruststoreBucket:
+              Fn::ImportValue: !Sub "${AWS::StackName}-truststore-bucket"
+        TruststoreVersion: !Ref TruststoreVersion
+  DomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref DomainName
+      Stage: !Ref HttpApiStage
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      AliasTarget:
+        DNSName: !GetAtt DomainName.RegionalDomainName
+        HostedZoneId: !GetAtt DomainName.RegionalHostedZoneId
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref ApiDomainName
+      Type: A

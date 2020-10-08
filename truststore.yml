@@ -1,0 +1,22 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description:
+  Mutual TLS truststore
+
+Resources:
+  TruststoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: "aws:kms"
+      VersioningConfiguration:
+        Status: Enabled
+
+Outputs:
+  TruststoreBucketName:
+    Value: !Ref TruststoreBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-bucket"
